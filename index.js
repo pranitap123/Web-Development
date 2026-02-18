@@ -1,10 +1,13 @@
 // Import required packages
-const express = require('express');
-const { UserModel, TodoModel } = require("./db"); // Import models from db.js
-const jwt = require("jsonwebtoken");
-const mongoose = require('mongoose');
+const express = require('express');          // Web framework for Node.js
+const { UserModel, TodoModel } = require("./db"); // Import database models
+const jwt = require("jsonwebtoken");         // For creating and verifying JWT tokens
+const mongoose = require('mongoose');        // MongoDB ORM
+const bcrypt = require('bcrypt');            // For hashing passwords
+const { z } = require("zod");                // For request validation
 
 // Secret key used to sign JWT tokens
+// (In real apps, store this in environment variables)
 const JWT_SECRET = "psp123";
 
 // Create Express app
@@ -21,23 +24,74 @@ mongoose.connect("mongodb+srv://admin:smxBNltsHGRTGkfX@cluster0.ygnl0xo.mongodb.
 // SIGNUP ROUTE
 // =========================
 app.post("/signup", async function(req, res){
+   
+    // Zod schema to validate request body
+    const requiredBody = z.object({
+        email: z.string()
+            .min(3)                 // minimum length
+            .max(100)               // maximum length
+            .email(),               // must be valid email
 
-    // Extract user data from request body
+        name: z.string()
+            .min(3)
+            .max(100),
+
+        password: z.string()
+            .min(8, "Password must be at least 8 characters long")
+            // At least one lowercase letter
+            .regex(/[a-z]/, "Password must contain a lowercase letter")
+            // At least one uppercase letter
+            .regex(/[A-Z]/, "Password must contain an uppercase letter")
+            // At least one number
+            .regex(/[0-9]/, "Password must contain a number")
+            // At least one special character
+            .regex(/[^A-Za-z0-9]/, "Password must contain a special character")
+    });
+
+    // Validate incoming request body
+    const parsedDataWithSuccess = requiredBody.safeParse(req.body);
+
+    // If validation fails
+    if(!parsedDataWithSuccess.success){
+        return res.json({
+            message: "Incorrect format",
+            error: parsedDataWithSuccess.error.issues
+        });
+    }
+
+    // Extract validated user data
     const email = req.body.email;
     const password = req.body.password;
     const name = req.body.name;
 
-    // Create a new user in database
-    await UserModel.create({
-        email: email,
-        password: password,
-        name: name
-    });
+    let errorThrown = false;
 
-    // Send response back to client
-    res.json({
-        message: "User created successfully"
-    });
+    try{
+        // Hash the password before storing in DB
+        // 5 = salt rounds (cost factor)
+        const hashedPassword = await bcrypt.hash(password, 5);
+
+        // Create a new user in database
+        await UserModel.create({
+            email: email,
+            password: hashedPassword, // store hashed password
+            name: name
+        });
+    }
+    catch(e){
+        // If user already exists or any DB error
+        res.json({
+            message: "User already exists"
+        });
+        errorThrown = true;
+    }
+
+    // Send success response if no error occurred
+    if(!errorThrown){
+        res.json({
+            message: "User created successfully"
+        });
+    }
 });
 
 
@@ -46,29 +100,37 @@ app.post("/signup", async function(req, res){
 // =========================
 app.post("/signin", async function(req, res){
 
-    // Get login credentials from request
+    // Get credentials from request
     const email = req.body.email;
     const password = req.body.password;
 
-    // Find user with matching email and password
+    // Find user in database
     const user = await UserModel.findOne({
         email: email,
-        password: password
     });
 
-    console.log(user);
+    // If user not found
+    if (!user){
+        return res.status(403).json({
+            message: "User doesn't exist in database"
+        });
+    }
 
-    // If user exists, create a token
-    if(user){
+    // Compare entered password with hashed password in DB
+    const passwordMatch = await bcrypt.compare(password, user.password);
+
+    if(passwordMatch){
+        // Create JWT token containing userId
         const token = jwt.sign({
-            userId: user._id.toString()   // store userId inside token
+            userId: user._id.toString()
         }, JWT_SECRET);
 
+        // Send token to client
         res.json({
             token: token
         });
     } else {
-        // If user not found
+        // Password incorrect
         res.status(403).json({
             message: "Incorrect Credentials"
         });
@@ -83,6 +145,8 @@ app.post("/todo", auth, async function(req, res){
 
     // userId extracted from token in auth middleware
     const userId = req.userId;
+
+    // Get todo title from request body
     const title = req.body.title;
 
     // Create todo for that user
@@ -110,6 +174,7 @@ app.get("/todos", auth, async function(req, res){
         userId: userId
     });
 
+    // Send todos back to client
     res.json({
         todos: todos
     });
